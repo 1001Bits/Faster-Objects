@@ -15,13 +15,13 @@
 // SKSE Menu Framework (Nexus SE 120352, QTR-Modding/SKSE-Menu-Framework-3; version 2 has the same exports) draws its Mod
 // Control Panel with Dear ImGui and exports the cimgui functions (igCheckbox, ...) next to its own (AddSectionItem). The
 // few used here are looked up by name rather than through the framework's header, whose ImGui wrappers call whatever
-// GetProcAddress returns: nothing is linked, a missing DLL or export only leaves the pages out, and no pointer that was
+// GetProcAddress returns: nothing is linked, a missing DLL or export only leaves the page out, and no pointer that was
 // not found is ever called. Only export names and their C signatures are declared (cimgui, Dear ImGui 1.90).
 //
-// The pages show Settings: each frame they read it, and a change goes to Settings at once (live options apply, the INI is
+// The page shows Settings: each frame it reads it, and a change goes to Settings at once (live options apply, the INI is
 // written in the background). The framework calls a page once per frame, inside its ImGui frame on the game's render
-// thread and only while that page is open, so the pages take nothing but the Settings lock (and read Precombines::Failed,
-// an atomic), never stateMutex, and do no file I/O. The page is named after the mod ("Faster Objects"); the DLL, INI and log keep the SkyrimPrecombines name.
+// thread and only while that page is open, so the page takes nothing but the Settings lock (and reads Precombines::Failed,
+// an atomic), never stateMutex, and does no file I/O. The page is named after the mod ("Faster Objects"); the DLL, INI and log keep the SkyrimPrecombines name.
 namespace SmfMenu {
     namespace {
         using RenderFunction=void(__stdcall*)();
@@ -40,13 +40,10 @@ namespace SmfMenu {
             void(*TextUnformatted)(const char* text,const char* end)=nullptr;
             TextV TextWrappedV=nullptr;
             TextV TextDisabledV=nullptr;
-            TextV BulletTextV=nullptr;
             void(*SeparatorText)(const char* label)=nullptr;
             void(*Spacing)()=nullptr;
-            void(*BeginDisabled)(bool disabled)=nullptr;
-            void(*EndDisabled)()=nullptr;
         };
-        Api api;  // complete before the pages are added (Register), read only by their callbacks
+        Api api;  // complete before the page is added (Register), read only by its callback
 
         template<class F> bool Resolve(REX::W32::HMODULE module,const char* name,F& out) {
             out=reinterpret_cast<F>(REX::W32::GetProcAddress(module,name));
@@ -57,14 +54,6 @@ namespace SmfMenu {
         // ImGui's text functions take a printf format; text always goes in as its argument, so a '%' in it is shown.
         void CallV(TextV f,const char* fmt,...) { va_list a; va_start(a,fmt); f(fmt,a); va_end(a); }
         void Tooltip(const char* help) { CallV(api.SetItemTooltipV,"%s",help); }
-
-        // BeginDisabled and EndDisabled always in pairs, also when a page stops early.
-        struct Disabled {
-            explicit Disabled(bool disabled) { api.BeginDisabled(disabled); }
-            ~Disabled() { api.EndDisabled(); }
-            Disabled(const Disabled&)=delete;
-            Disabled& operator=(const Disabled&)=delete;
-        };
 
         // A setting's row: its shipped INI name (Settings' id), label and help, and what its status line (when
         // Settings::Status has one) starts with.
@@ -103,14 +92,6 @@ namespace SmfMenu {
         constexpr Row kMinExtent{"fMinOccludeeExtent","Smallest tested object (restart)",
             "Each tested box is at least twice this thick (the value is a half-size; default 10), so thin objects are hidden less often. Not used when "
             "SkyrimVR.ini sets fMinOccludeeBoxExtent, or with Community Shaders. Applies after you restart the game."};
-        constexpr Row kShortcuts{"bDeveloperShortcuts","Developer shortcut keys",
-            "Off by default. While on, the keys below switch features on and off for testing, in play only (not in menus or the console) and not with "
-            "Ctrl, Alt or Shift held. What they switch lasts until you quit and is not saved."};
-        // Each key's line is shown with it (toggle_key=68): the INI takes a decimal scan code only (Config::Number), not a
-        // key name or hex.
-        constexpr const char* kKeyHelp=
-            "To change a key, set its line (in brackets) in SkyrimPrecombines.ini to another DirectInput scan code, as a decimal number (0: none); add "
-            "the line if it is not there. Avoid F1 (SKSE Menu Framework), F5 (quicksave), F9 (quickload) and F12 (Steam screenshot).";
 
         // "<label>##<name>": the label shown and an ID unique on the page, without an allocation each frame.
         struct Id {
@@ -207,25 +188,6 @@ namespace SmfMenu {
                 if(Settings::RestartPending()) CallV(api.TextWrappedV,"%s","Restart the game to apply the changes marked (restart) or noted above.");
             } catch(const std::exception& e) { Failed(e.what()); } catch(...) { Failed("unknown error"); }
         }
-
-        void __stdcall RenderDeveloper() {
-            try {
-                api.SeparatorText("Developer shortcuts");
-                Toggle(kShortcuts);
-                // The keys work while bDeveloperShortcuts is on, or always with developer_mode (fixed at startup).
-                const bool on=Settings::ShortcutsOn();
-                if(on && !Settings::GetBool(kShortcuts.name)) api.TextUnformatted("These keys work now: developer_mode is set in SkyrimPrecombines.ini.",nullptr);
-                {
-                    const Disabled off(!on);
-                    for(const auto& shortcut:Settings::Shortcuts()) {
-                        if(!Settings::Available(shortcut.key)) continue;
-                        const auto code=static_cast<std::uint32_t>(Settings::GetInt(shortcut.key));
-                        CallV(api.BulletTextV,"%s",std::format("{}  {}  ({}={})",Settings::KeyName(code),shortcut.label,shortcut.key,code).c_str());
-                    }
-                }
-                CallV(api.TextWrappedV,"%s",kKeyHelp);
-            } catch(const std::exception& e) { Failed(e.what()); } catch(...) { Failed("unknown error"); }
-        }
     }
 
     void Register() {
@@ -238,20 +200,17 @@ namespace SmfMenu {
                 Resolve(module,"igIsItemActive",found.IsItemActive) && Resolve(module,"igIsItemDeactivatedAfterEdit",found.IsItemDeactivatedAfterEdit) &&
                 Resolve(module,"igSetItemTooltipV",found.SetItemTooltipV) && Resolve(module,"igTextUnformatted",found.TextUnformatted) &&
                 Resolve(module,"igTextWrappedV",found.TextWrappedV) && Resolve(module,"igTextDisabledV",found.TextDisabledV) &&
-                Resolve(module,"igBulletTextV",found.BulletTextV) && Resolve(module,"igSeparatorText",found.SeparatorText) &&
-                Resolve(module,"igSpacing",found.Spacing) && Resolve(module,"igBeginDisabled",found.BeginDisabled) &&
-                Resolve(module,"igEndDisabled",found.EndDisabled);
+                Resolve(module,"igSeparatorText",found.SeparatorText) && Resolve(module,"igSpacing",found.Spacing);
             if(!complete) return;
             api=found;
             // Once, at kPostLoad: the framework's menu tree has no lock, and nothing renders yet. The framework splits the
             // path at '/' (section, then page), so the names hold no other.
             api.AddSectionItem("Faster Objects/Settings",RenderSettings);
-            api.AddSectionItem("Faster Objects/Developer",RenderDeveloper);
-            logger::info("SKSE Menu Framework: Faster Objects pages added");
+            logger::info("SKSE Menu Framework: Faster Objects page added");
         } catch(const std::exception& e) {
-            logger::warn("SKSE Menu Framework pages not added: {}",e.what());
+            logger::warn("SKSE Menu Framework page not added: {}",e.what());
         } catch(...) {
-            logger::warn("SKSE Menu Framework pages not added: unknown error");
+            logger::warn("SKSE Menu Framework page not added: unknown error");
         }
     }
 }
